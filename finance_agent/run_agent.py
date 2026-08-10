@@ -77,7 +77,7 @@ async def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.0,
+        default=1.0,
         help="Temperature for model generation",
     )
     parser.add_argument("--questions", type=str, nargs="+", help="List of questions to process")

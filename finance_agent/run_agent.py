@@ -104,13 +104,13 @@ async def main():
         "--max-time",
         type=int,
         default=MAX_TIME_SECONDS,
-        help="Maximum time in seconds for the agent to run before stopping (default: 60 minutes)",
+        help="Maximum time in seconds for the agent to run before stopping (default: 2 hours)",
     )
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=50,
-        help="Maximum number of agent turns for local testing (default: 50). The benchmark evaluation workflow uses time limits only.",
+        default=None,
+        help="Maximum number of agent turns (default: unlimited, time limit only)",
     )
     parser.add_argument(
         "--parallelism",

@@ -22,7 +22,7 @@ from .tools import (
 )
 
 
-MAX_TIME_SECONDS = 60 * 60  # 1 hour
+MAX_TIME_SECONDS = 2 * 60 * 60  # 2 hours
 
 
 class Parameters(BaseModel):

@@ -33,6 +33,11 @@ async def run_single_task(
     For a harness driving one question per process. Failures propagate: the process
     exits nonzero and writes no file, which is how the harness detects them.
     """
+    # task_id names a directory under output_dir. An absolute value or one containing
+    # a separator would resolve outside it and write the record somewhere unexpected.
+    if not task_id or task_id in {".", ".."} or "/" in task_id or "\\" in task_id:
+        raise ValueError(f"task_id must be a single path segment, got {task_id!r}")
+
     agent = get_agent(parameters, log_dir=log_dir)
     result = await agent.run(build_input(question), question_id=task_id, atif_export=True)
 

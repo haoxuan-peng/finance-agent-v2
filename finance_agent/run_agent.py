@@ -9,7 +9,7 @@ from model_library.agent import AgentResult
 from model_library.base import LLMConfig
 from tqdm.asyncio import tqdm
 
-from .get_agent import Parameters, build_input, get_agent, MAX_TIME_SECONDS
+from .get_agent import Parameters, build_input, get_agent
 from .tools import VALID_TOOLS
 
 # A time or turn limit is reported through the stop reason, not by raising. Anything
@@ -113,21 +113,24 @@ async def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=None,
-        help="Maximum number of tokens for completion generation (default: model-library's)",
+        default=32000,
+        help="Maximum number of tokens for completion generation",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=None,
-        help="Temperature for model generation (default: model-library's)",
+        default=0.0,
+        help="Temperature for model generation",
     )
     parser.add_argument("--questions", type=str, nargs="+", help="List of questions to process")
     parser.add_argument(
         "--model",
         type=str,
         default="anthropic/claude-sonnet-4-5-20250929",
-        help="Model to use to generate completions",
+        help=(
+            "Model to use. Bare names (for example glm-5.2) use the custom "
+            "OpenAI-compatible proxy; provider-qualified names use model-library."
+        ),
     )
     parser.add_argument(
         "--question-file",
@@ -142,17 +145,29 @@ async def main():
         choices=VALID_TOOLS,
         help="List of tools to make available to the agent",
     )
-    parser.add_argument(
-        "--max-time",
+    turn_limit_group = parser.add_mutually_exclusive_group()
+    turn_limit_group.add_argument(
+        "--max-turns",
+        "--max_turns",
+        dest="max_turns",
         type=int,
-        default=MAX_TIME_SECONDS,
-        help="Maximum time in seconds for the agent to run before stopping (default: 2 hours)",
+        default=50,
+        help="Maximum number of turns for the agent to take before stopping",
+    )
+    turn_limit_group.add_argument(
+        "--no-max-turns",
+        "--no_max_turns",
+        dest="no_max_turns",
+        action="store_true",
+        help="Disable the turn limit; requires --max-time/--max_time",
     )
     parser.add_argument(
-        "--max-turns",
-        type=int,
+        "--max-time",
+        "--max_time",
+        dest="max_time",
+        type=float,
         default=None,
-        help="Maximum number of agent turns (default: unlimited, time limit only)",
+        help="Maximum wall-clock seconds per question, including retry/backoff time",
     )
     parser.add_argument(
         "--parallelism",
@@ -175,6 +190,11 @@ async def main():
     parser.add_argument("--task-id", type=str, help="Task id naming the generation.json subdirectory")
     args = parser.parse_args()
 
+    if args.no_max_turns and args.max_time is None:
+        parser.error("--no-max-turns/--no_max_turns requires --max-time/--max_time")
+    if args.max_time is not None and args.max_time <= 0:
+        parser.error("--max-time/--max_time must be greater than 0")
+
     env_file = Path(".env")
     load_dotenv(override=True, dotenv_path=env_file)
 
@@ -195,19 +215,15 @@ async def main():
     else:
         raise Exception("No questions provided. One of --question-file or --questions must be used.")
 
-    # Omitted values keep the model-library default.
-    llm_kwargs = {
-        name: value
-        for name, value in (("max_tokens", args.max_tokens), ("temperature", args.temperature))
-        if value is not None
-    }
-
     parameters = Parameters(
         model_name=args.model,
-        max_time_seconds=args.max_time,
-        max_turns=args.max_turns,
+        max_turns=None if args.no_max_turns else args.max_turns,
+        max_time=args.max_time,
         tools=args.tools,
-        llm_config=LLMConfig(**llm_kwargs),
+        llm_config=LLMConfig(
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+        ),
     )
 
     if single_task:

@@ -640,8 +640,8 @@ class RetrieveInformation(Tool):
         "\n"
         "The {{key_name}} will be replaced with the full text of the document stored under that key before the query is sent.\n"
         "\n"
-        "IMPORTANT: Your prompt MUST include at least one key from the data storage using this exact format: {{key_name}}. "
-        "If you don't use this exact format with double braces, the tool will fail to retrieve the information.\n"
+        "Your prompt SHOULD include at least one key from the data storage using this exact format: {{key_name}}. "
+        "If the placeholder is omitted, the tool automatically attaches the most relevant available key.\n"
         "\n"
         "You can also optionally only pass *a portion* of each document to the LLM, rather than the entire document. This can be used to avoid token limit errors or improve efficiency. "
         "To do so, use the input_character_ranges parameter to specify which portions of documents to extract. "
@@ -651,7 +651,7 @@ class RetrieveInformation(Tool):
     parameters: dict[str, Any] = {
         "prompt": {
             "type": "string",
-            "description": "The prompt that will be passed to the LLM. You MUST include at least one data storage key in the format {{key_name}} - for example: 'Summarize this 10-K filing: {{company_10k}}'. The content stored under each key will replace the {{key_name}} placeholder.",
+            "description": "The prompt that will be passed to the LLM. Include a data storage key in the format {{key_name}} when possible - for example: 'Summarize this 10-K filing: {{company_10k}}'. If omitted, the tool automatically attaches an available stored document.",
         },
         "input_character_ranges": {
             "type": "array",
@@ -680,6 +680,36 @@ class RetrieveInformation(Tool):
 
     def __init__(self, llm: LLM):
         self._llm = llm
+
+    def _attach_missing_placeholders(
+        self,
+        prompt: str,
+        input_character_ranges: list,
+        state: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        """Attach stored-document placeholders when the model omitted them."""
+        if re.search(r"{{[^{}]+}}", prompt):
+            return prompt, []
+
+        if not state:
+            raise ValueError(
+                "ERROR: No documents are available in data storage. Use parse_html_page before retrieve_information."
+            )
+
+        range_keys = []
+        for range_spec in input_character_ranges:
+            if isinstance(range_spec, dict) and isinstance(range_spec.get("key"), str):
+                key = range_spec["key"]
+                if key not in range_keys:
+                    range_keys.append(key)
+
+        mentioned_keys = [key for key in state if key in prompt]
+        selected_keys = range_keys or mentioned_keys or [next(reversed(state))]
+        attachments = "\n".join(
+            f"- {key}: " + "{{" + key + "}}" for key in selected_keys
+        )
+        repaired_prompt = prompt.rstrip() + "\n\nStored document(s):\n" + attachments
+        return repaired_prompt, selected_keys
 
     def _validate_inputs(
         self, prompt: str, input_character_ranges: list, state: dict[str, Any]
@@ -757,6 +787,14 @@ class RetrieveInformation(Tool):
             if input_character_ranges is None:
                 input_character_ranges = []
 
+            prompt, attached_keys = self._attach_missing_placeholders(
+                prompt, input_character_ranges, state
+            )
+            if attached_keys:
+                logger.warning(
+                    "Retrieve information prompt omitted storage placeholders; automatically attached: %s",
+                    ", ".join(attached_keys),
+                )
             ranges_dict = self._validate_inputs(prompt, input_character_ranges, state)
             prompt = self._format_prompt(prompt, ranges_dict, state)
             response = await self._llm.query(prompt)

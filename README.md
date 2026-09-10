@@ -40,6 +40,14 @@ ANTHROPIC_API_KEY=<anthropic_api_key>
 GOOGLE_API_KEY=<google_api_key>
 ETC_API_KEY=<etc_api_key>
 
+# OpenAI-compatible model proxy (used when --model is a bare model name)
+AGENT_BASE_URL=https://your-proxy.example.com/v1
+AGENT_API_KEY=<proxy_api_key>
+
+# Optional Qwen-family endpoint. Qwen model names prefer these over AGENT_*.
+QWEN3_API_URL=https://your-qwen-server.example.com/v1
+QWEN3_API_KEY=<qwen_api_key>
+
 # Tool API Keys
 TAVILY_API_KEY=<tavily_api_key>
 SEC_EDGAR_API_KEY=<sec_api_key>  # supports semicolon-separated keys for round-robin rotation, e.g. key1;key2;key3
@@ -49,6 +57,18 @@ PRICING_DATA_API_KEY=<pricing_data_api_key> # Tiingo API key
 You can create a Tavily API key [here](https://tavily.com/), and an SEC API key [here](https://sec-api.io/).
 
 The `.env` takes precedence over set environment variables.
+
+When `--model` is a bare model name such as `glm-5.2`, the agent sends model
+requests to `AGENT_BASE_URL` using `AGENT_API_KEY` and the OpenAI-compatible
+Chat Completions protocol. `AGENT_URL` and `AGENT_KEY` are accepted as aliases.
+The base URL may be either an API base such as `https://host/v1` or a full
+`https://host/v1/chat/completions` URL. Provider-qualified names continue to use
+the model-library registry.
+
+Bare Qwen model names first use `QWEN3_API_URL` and `QWEN3_API_KEY`, falling back
+to the general `AGENT_*` configuration. Model-specific variables take priority;
+for example, `MODEL_QWEN3_5_9B_BASE_URL`, `MODEL_QWEN3_5_9B_API_KEY`, and
+`MODEL_QWEN3_5_9B_MODEL_ID` configure `qwen3.5-9b` independently.
 
 Finally, you should add the "Test Suite IDs" to suites.json. These should have generally been provided to you via email, but you can also find them in the platform, by navigating to the "Test Suites" page, clicking the relevant test suite, and looking on the right sidebar under "Test Suite ID".
 

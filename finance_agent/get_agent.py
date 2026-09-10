@@ -1,13 +1,22 @@
-import os
 from pathlib import Path
 
-from model_library.agent import Agent, AgentConfig, AgentHooks, TimeLimit, ToolCallRecord, TurnLimit, TurnResult, default_before_query, truncate_oldest
+from model_library.agent import (
+    Agent,
+    AgentConfig,
+    AgentHooks,
+    TimeLimit,
+    ToolCallRecord,
+    TurnLimit,
+    TurnResult,
+    default_before_query,
+    truncate_oldest,
+)
 from model_library.base import LLM, LLMConfig, RawResponse, TextInput
 from model_library.base.input import InputItem, SystemInput
 from model_library.exceptions import MaxContextWindowExceededError
-from model_library.registry_utils import get_raw_model, get_registry_model
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel
 
+from .model_factory import get_model
 from .prompt import QUESTION_PROMPT, SYSTEM_PROMPT
 from .exceptions import RetryExhaustedError
 from .tools import (
@@ -35,39 +44,19 @@ class Parameters(BaseModel):
 
 
 def build_input(question: str) -> list[InputItem]:
-    return [SystemInput(text=SYSTEM_PROMPT), TextInput(text=QUESTION_PROMPT.format(question=question))]
+    return [
+        SystemInput(text=SYSTEM_PROMPT),
+        TextInput(text=QUESTION_PROMPT.format(question=question)),
+    ]
 
 
 def create_llm(parameters: Parameters) -> LLM:
-    """Create an LLM instance from parameters using the model registry.
+    """Create an LLM using the same routing as the original finance agent.
 
-    With CUSTOM_ENDPOINT set, bypass the registry and target the given
-    OpenAI-compatible endpoint instead, so a model id the registry does not know
-    can still be run.
+    Kept as a compatibility wrapper for callers of the v2 package; new code
+    should use :func:`model_factory.get_model` directly.
     """
-    endpoint = os.environ.get("CUSTOM_ENDPOINT")
-    if not endpoint:
-        return get_registry_model(parameters.model_name, parameters.llm_config)
-
-    api_key = os.environ.get("CUSTOM_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "CUSTOM_ENDPOINT is set but CUSTOM_API_KEY is not; the custom endpoint "
-            "needs its own key. Without it the provider's default key (e.g. "
-            "OPENAI_API_KEY) would be sent to the custom endpoint."
-        )
-
-    config = parameters.llm_config.model_copy(
-        update={
-            "custom_endpoint": endpoint,
-            "custom_api_key": SecretStr(api_key),
-            # The agent drives a tool loop, so tool support is required of the endpoint.
-            "supports_tools": True,
-            # The endpoint's capabilities are unknown, so never send temperature.
-            "supports_temperature": False,
-        }
-    )
-    return get_raw_model(parameters.model_name, config=config)
+    return get_model(parameters.model_name, parameters.llm_config)
 
 
 def get_agent(
@@ -77,7 +66,7 @@ def get_agent(
 ) -> Agent:
     """Helper method to instantiate an agent with the given parameters"""
     if llm is None:
-        llm = create_llm(parameters)
+        llm = get_model(parameters.model_name, parameters.llm_config)
 
     available_tools: dict[str, type[Tool]] = {
         "web_search": TavilyWebSearch,
@@ -91,7 +80,9 @@ def get_agent(
     selected_tools: list[Tool] = []
     for tool_name in parameters.tools:
         if tool_name not in available_tools:
-            raise Exception(f"Tool {tool_name} not found in tools. Available tools: {available_tools.keys()}")
+            raise Exception(
+                f"Tool {tool_name} not found in tools. Available tools: {available_tools.keys()}"
+            )
         tool_cls = available_tools[tool_name]
         if tool_name == "retrieve_information":
             selected_tools.append(tool_cls(llm=llm))  # type: ignore[call-arg]
@@ -116,7 +107,9 @@ def get_agent(
     #   _should_stop=False means the only clean exit (no final_error) is the done tool break,
     #   and default_determine_answer finds the done record before reaching the text fallback.
 
-    def _before_query(history: list[InputItem], last_error: Exception | None) -> list[InputItem]:
+    def _before_query(
+        history: list[InputItem], last_error: Exception | None
+    ) -> list[InputItem]:
         """Truncate on context window overflow, re-raise all other errors (stops the loop).
 
         Also injects a nudge to call a tool when the previous turn had no tool calls
@@ -125,11 +118,15 @@ def get_agent(
         if isinstance(last_error, MaxContextWindowExceededError):
             return truncate_oldest(history)
         if history and isinstance(history[-1], RawResponse):
-            history.append(TextInput(text=(
-                "Your last response produced no tool call. "
-                "Call `submit_final_result` if you have a final result, "
-                "otherwise continue with the next tool call."
-            )))
+            history.append(
+                TextInput(
+                    text=(
+                        "Your last response produced no tool call. "
+                        "Call `submit_final_result` if you have a final result, "
+                        "otherwise continue with the next tool call."
+                    )
+                )
+            )
         return default_before_query(history, last_error)
 
     def _on_tool_result(record: ToolCallRecord, state: dict) -> None:
@@ -150,7 +147,9 @@ def get_agent(
         name="finance",
         log_dir=log_dir or Path("logs"),
         config=AgentConfig(
-            turn_limit=TurnLimit(max_turns=parameters.max_turns) if parameters.max_turns else None,
+            turn_limit=TurnLimit(max_turns=parameters.max_turns)
+            if parameters.max_turns
+            else None,
             time_limit=TimeLimit(max_seconds=parameters.max_time_seconds),
         ),
         hooks=AgentHooks(

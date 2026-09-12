@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
@@ -11,16 +12,16 @@ from bs4 import BeautifulSoup
 from model_library.agent import Tool, ToolOutput
 from model_library.base import LLM
 from tavily import AsyncTavilyClient
+from tavily.errors import InvalidAPIKeyError, UsageLimitExceededError
 
 from simpleeval import SimpleEval
 
 from .exceptions import (
     RetryExhaustedError,
     get_retry_policy,
-    retry_http_errors,
     retry_with_policy,
 )
-from .key_rotator import KeyRotator, get_rotator
+from .key_rotator import KeyRotator, NoAvailableAPIKeysError, get_rotator
 
 
 VALID_TOOLS = [
@@ -153,14 +154,48 @@ class TavilyWebSearch(Tool):
     }
     required = ["search_query"]
 
-    def __init__(self, tavily_api_key: str | None = None):
-        if not tavily_api_key:
-            tavily_api_key = os.getenv("TAVILY_API_KEY")
-        if not tavily_api_key:
-            raise ValueError("TAVILY_API_KEY is not set")
-        self.client = AsyncTavilyClient(api_key=tavily_api_key)
+    def __init__(
+        self,
+        tavily_api_key: str | None = None,
+        key_rotator: KeyRotator | None = None,
+        client_factory: Callable[[str], Any] = AsyncTavilyClient,
+    ):
+        if key_rotator is not None:
+            self._key_rotator = key_rotator
+        elif tavily_api_key:
+            keys = [key.strip() for key in tavily_api_key.split(";") if key.strip()]
+            self._key_rotator = KeyRotator(keys, strategy="sticky")
+        else:
+            self._key_rotator = get_rotator("TAVILY_API_KEY", strategy="sticky")
+        self._client_factory = client_factory
+        self._clients: dict[str, Any] = {}
 
-    @retry_http_errors(429, 503, max_tries=8)
+    def _client_for_key(self, key: str) -> Any:
+        if key not in self._clients:
+            self._clients[key] = self._client_factory(key)
+        return self._clients[key]
+
+    @staticmethod
+    def _is_key_failure(exception: Exception) -> bool:
+        if isinstance(
+            exception,
+            (UsageLimitExceededError, InvalidAPIKeyError),
+        ):
+            return True
+
+        # Keep compatibility with proxy/wrapper versions of the Tavily SDK
+        # that flatten explicit quota/key errors into a generic exception.
+        message = str(exception).lower()
+        return any(
+            marker in message
+            for marker in (
+                "exceeds your plan's set usage limit",
+                "usage limit exceeded",
+                "invalid api key",
+                "invalid_api_key",
+            )
+        )
+
     async def _execute_search(
         self,
         search_query: str,
@@ -185,15 +220,34 @@ class TavilyWebSearch(Tool):
         if end_date:
             kwargs["end_date"] = end_date
 
-        response = await self.client.search(
-            search_depth="fast",
-            max_results=number_of_results,
-            chunks_per_source=1,
-            query=search_query,
-            **kwargs,
-        )
+        last_key_error: Exception | None = None
+        while self._key_rotator.active_key_count:
+            async with self._key_rotator.acquire() as key:
+                client = self._client_for_key(key)
+                try:
+                    response = await client.search(
+                        search_depth="fast",
+                        max_results=number_of_results,
+                        chunks_per_source=1,
+                        query=search_query,
+                        **kwargs,
+                    )
+                    return response.get("results", [])
+                except Exception as exception:
+                    if not self._is_key_failure(exception):
+                        raise
+                    last_key_error = exception
+                    disabled = await self._key_rotator.disable(key)
+                    if disabled:
+                        logging.getLogger(__name__).warning(
+                            "Disabled an unavailable Tavily API key; %d active key(s) remain",
+                            self._key_rotator.active_key_count,
+                        )
 
-        return response.get("results", [])
+        message = "All configured Tavily API keys are unavailable"
+        if last_key_error:
+            message += f". Last error: {last_key_error}"
+        raise NoAvailableAPIKeysError(message)
 
     async def execute(
         self, args: dict[str, Any], state: dict[str, Any], logger: logging.Logger
@@ -261,9 +315,11 @@ class EDGARSearch(Tool):
         if key_rotator is not None:
             self._key_rotator = key_rotator
         elif sec_api_key:
-            self._key_rotator = KeyRotator([sec_api_key])
+            self._key_rotator = KeyRotator([sec_api_key], strategy="round_robin")
         else:
-            self._key_rotator = get_rotator("SEC_EDGAR_API_KEY")
+            self._key_rotator = get_rotator(
+                "SEC_EDGAR_API_KEY", strategy="round_robin"
+            )
         self.sec_api_url: str = "https://api.sec-api.io/full-text-search"
 
     @retry_with_policy({429: 20, 503: 20})

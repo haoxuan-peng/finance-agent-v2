@@ -1,7 +1,8 @@
+import os
 import unittest
 from unittest.mock import patch
 
-from finance_agent.key_rotator import KeyRotator
+from finance_agent.key_rotator import KeyRotator, NoAvailableAPIKeysError
 
 
 async def _take_keys(rotator: KeyRotator, count: int) -> list[str]:
@@ -13,37 +14,40 @@ async def _take_keys(rotator: KeyRotator, count: int) -> list[str]:
 
 
 class KeyRotatorTest(unittest.IsolatedAsyncioTestCase):
-    async def test_shuffles_a_copy_then_cycles_it(self) -> None:
+    async def test_sticky_strategy_keeps_using_first_key(self) -> None:
         keys = ["key-a", "key-b", "key-c"]
-        expected = list(reversed(keys))
-
-        with patch(
-            "finance_agent.key_rotator.random.shuffle",
-            side_effect=lambda values: values.reverse(),
-        ) as shuffle:
-            actual = await _take_keys(KeyRotator(keys), len(keys) * 2)
+        actual = await _take_keys(KeyRotator(keys), len(keys) * 2)
 
         self.assertEqual(keys, ["key-a", "key-b", "key-c"])
-        self.assertEqual(actual, expected * 2)
-        self.assertEqual(shuffle.call_count, 1)
+        self.assertEqual(actual, ["key-a"] * (len(keys) * 2))
 
-    async def test_each_rotator_shuffles_independently(self) -> None:
-        keys = ["key-a", "key-b", "key-c"]
-        orders = iter([list(reversed(keys)), ["key-b", "key-a", "key-c"]])
+    async def test_round_robin_strategy_cycles_available_keys(self) -> None:
+        rotator = KeyRotator(["key-a", "key-b", "key-c"], strategy="round_robin")
 
-        def use_next_order(values: list[str]) -> None:
-            values[:] = next(orders)
+        actual = await _take_keys(rotator, 6)
 
-        with patch(
-            "finance_agent.key_rotator.random.shuffle", side_effect=use_next_order
-        ) as shuffle:
-            first = await _take_keys(KeyRotator(keys), len(keys))
-            second = await _take_keys(KeyRotator(keys), len(keys))
+        self.assertEqual(actual, ["key-a", "key-b", "key-c"] * 2)
 
-        self.assertNotEqual(first, second)
-        self.assertCountEqual(first, keys)
-        self.assertCountEqual(second, keys)
-        self.assertEqual(shuffle.call_count, 2)
+    async def test_disabled_sticky_key_is_replaced(self) -> None:
+        rotator = KeyRotator(["key-a", "key-b"])
+
+        await rotator.disable("key-a")
+
+        self.assertEqual(rotator.active_key_count, 1)
+        self.assertEqual(await _take_keys(rotator, 1), ["key-b"])
+
+    async def test_all_keys_disabled_raise_safe_error(self) -> None:
+        rotator = KeyRotator(["key-a"])
+        await rotator.disable("key-a")
+
+        with self.assertRaises(NoAvailableAPIKeysError):
+            await _take_keys(rotator, 1)
+
+    def test_from_env_parses_semicolon_separated_keys(self) -> None:
+        with patch.dict(os.environ, {"TEST_API_KEYS": " key-a ; key-b ; key-a "}):
+            rotator = KeyRotator.from_env("TEST_API_KEYS")
+
+        self.assertEqual(rotator.key_count, 2)
 
 
 if __name__ == "__main__":

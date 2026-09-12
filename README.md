@@ -49,7 +49,7 @@ QWEN3_API_URL=https://your-qwen-server.example.com/v1
 QWEN3_API_KEY=<qwen_api_key>
 
 # Tool API Keys
-TAVILY_API_KEY=<tavily_api_key>
+TAVILY_API_KEY=<tavily_api_key>  # supports semicolon-separated failover keys, e.g. key1;key2;key3
 SEC_EDGAR_API_KEY=<sec_api_key>  # supports semicolon-separated keys for round-robin rotation, e.g. key1;key2;key3
 PRICING_DATA_API_KEY=<pricing_data_api_key> # Tiingo API key
 ```

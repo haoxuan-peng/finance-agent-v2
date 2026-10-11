@@ -9,6 +9,12 @@ Default output is the native ms-swift Agent format.  In this format Qwen's
 chat/agent template inserts <|im_start|>, <tools>, <tool_call> and
 <tool_response> at tokenization time.  Only <think> is kept directly in the
 assistant content because it is supervised model output.
+Keep normalize_sft_loss.py beside this script when copying it elsewhere.
+By default, failed tool-call groups have loss=false. Source success/error
+flags take priority over error-return heuristics. ms-swift merges parallel
+calls under one loss flag, so any failed call masks its entire group while
+keeping the observations and assistant reasoning. Disable this policy with
+--no-mask-failed-tool-calls.
 
 Modes:
   trajectory: preserve the agent conversation, including reasoning, tool calls
@@ -34,6 +40,8 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable
+
+from normalize_sft_loss import mask_failed_tool_calls, normalize_sample_loss, tool_result_failed
 
 
 def clean_text(value: Any) -> str:
@@ -294,7 +302,9 @@ def assistant_message_from_raw_response(item: Any, *, include_reasoning: bool) -
 
 
 def ms_swift_messages_from_raw_response(
-    item: Any, *, include_reasoning: bool
+    item: Any, *, include_reasoning: bool,
+    tool_statuses: dict[str, bool] | None = None,
+    tool_outcomes: list[tuple[str, bool]] | None = None,
 ) -> list[dict[str, Any]]:
     """Split one model response into assistant text and tool_call messages.
 
@@ -316,11 +326,18 @@ def ms_swift_messages_from_raw_response(
     if content:
         messages.append({"role": "assistant", "content": content})
 
-    for tool_call in get_field(response, "tool_calls") or []:
+    for position, tool_call in enumerate(get_field(response, "tool_calls") or []):
+        call_id = clean_text(get_field(tool_call, "id") or get_field(tool_call, "call_id"))
+        failed = (tool_statuses or {}).get(call_id, tool_result_failed(tool_call))
+        if call_id not in (tool_statuses or {}) and tool_outcomes and position < len(tool_outcomes):
+            result_id, result_failed = tool_outcomes[position]
+            if not call_id or not result_id:
+                failed = result_failed
         messages.append(
             {
                 "role": "tool_call",
                 "content": dump_json(convert_tool_call_ms_swift(tool_call)),
+                "loss": not failed,
             }
         )
     return messages
@@ -424,6 +441,7 @@ def trajectory_to_messages(
     include_reasoning: bool,
     tool_role: str,
     output_schema: str,
+    tool_statuses: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert an ATIF trajectory into the same message layout as history."""
     messages: list[dict[str, Any]] = []
@@ -454,15 +472,27 @@ def trajectory_to_messages(
         observations = [item for item in observations if isinstance(item, dict)]
 
         if output_schema == "ms-swift":
+            statuses = dict(tool_statuses or {})
+            for item in observations:
+                call_id = clean_text(item.get("source_call_id"))
+                if call_id and call_id not in statuses:
+                    statuses[call_id] = tool_result_failed(item, content=clean_text(item.get("content")))
             if content:
                 messages.append({"role": "assistant", "content": content})
-            for tool_call in tool_calls:
+            for position, tool_call in enumerate(tool_calls):
+                call_id = atif_tool_call_id(tool_call)
+                failed = statuses.get(call_id, tool_result_failed(tool_call))
+                if call_id not in statuses and position < len(observations):
+                    item = observations[position]
+                    if not call_id or not item.get("source_call_id"):
+                        failed = tool_result_failed(item, content=clean_text(item.get("content")))
                 messages.append(
                     {
                         "role": "tool_call",
                         "content": dump_json(
                             convert_atif_tool_call_ms_swift(tool_call)
                         ),
+                        "loss": not failed,
                     }
                 )
             for item in observations:
@@ -515,9 +545,27 @@ def history_to_messages(
     include_reasoning: bool,
     tool_role: str,
     output_schema: str,
+    tool_statuses: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
-    for item in history:
+    statuses = dict(tool_statuses or {})
+    outcomes: dict[int, list[tuple[str, bool]]] = {}
+    if output_schema == "ms-swift":
+        response_index = None
+        for index, item in enumerate(history):
+            if get_field(item, "kind") == "raw_response" or item.__class__.__name__ == "RawResponse":
+                response_index = index
+            if get_field(item, "kind") != "tool_result" and item.__class__.__name__ != "ToolResult":
+                continue
+            call = get_field(item, "tool_call")
+            call_id = clean_text(get_field(call, "id") or get_field(call, "call_id"))
+            if call_id and call_id not in statuses:
+                statuses[call_id] = tool_result_failed(item, content=clean_text(get_field(item, "result")))
+            if response_index is not None:
+                outcomes.setdefault(response_index, []).append(
+                    (call_id, statuses.get(call_id, tool_result_failed(item, content=clean_text(get_field(item, "result")))))
+                )
+    for index, item in enumerate(history):
         if isinstance(item, Mapping):
             kind = item.get("kind")
             if kind == "system":
@@ -534,7 +582,9 @@ def history_to_messages(
                 if output_schema == "ms-swift":
                     messages.extend(
                         ms_swift_messages_from_raw_response(
-                            response_item, include_reasoning=include_reasoning
+                            response_item, include_reasoning=include_reasoning,
+                            tool_statuses=statuses,
+                            tool_outcomes=outcomes.get(index),
                         )
                     )
                 else:
@@ -563,7 +613,9 @@ def history_to_messages(
             if output_schema == "ms-swift":
                 messages.extend(
                     ms_swift_messages_from_raw_response(
-                        item, include_reasoning=include_reasoning
+                        item, include_reasoning=include_reasoning,
+                        tool_statuses=statuses,
+                        tool_outcomes=outcomes.get(index),
                     )
                 )
             else:
@@ -634,13 +686,41 @@ def build_trajectory_record(
     tool_role: str,
     output_schema: str,
     include_tool_metadata: bool,
+    mask_failed_calls: bool = True,
 ) -> dict[str, Any]:
+    if isinstance(trace, dict):
+        expected_ids = {
+            atif_tool_call_id(call)
+            for step in trace.get("steps", []) if isinstance(step, dict)
+            for call in step.get("tool_calls", []) or [] if isinstance(call, dict)
+        }
+    else:
+        # Decode once so call IDs remain available even if a legacy tool result
+        # has lost its ID. history_to_messages can reuse the decoded response.
+        trace = [
+            {**item, "response": decode_history_response(item)}
+            if isinstance(item, Mapping) and item.get("kind") == "raw_response"
+            else item
+            for item in trace
+        ]
+        expected_ids = {
+            clean_text(get_field(get_field(item, "tool_call"), "id") or get_field(get_field(item, "tool_call"), "call_id"))
+            for item in trace if get_field(item, "tool_call") is not None
+        }
+        expected_ids.update(
+            clean_text(get_field(call, "id") or get_field(call, "call_id"))
+            for item in trace
+            for call in get_field(get_field(item, "response"), "tool_calls", []) or []
+        )
+    expected_ids.discard("")
+    statuses = collect_tool_statuses(question_dir, result, expected_call_ids=expected_ids) if output_schema == "ms-swift" and mask_failed_calls else {}
     if isinstance(trace, dict):
         messages = trajectory_to_messages(
             trace,
             include_reasoning=include_reasoning,
             tool_role=tool_role,
             output_schema=output_schema,
+            tool_statuses=statuses,
         )
     else:
         messages = history_to_messages(
@@ -648,9 +728,14 @@ def build_trajectory_record(
             include_reasoning=include_reasoning,
             tool_role=tool_role,
             output_schema=output_schema,
+            tool_statuses=statuses,
         )
     if not messages:
         raise ValueError(f"No messages extracted from {question_dir}")
+    if output_schema == "ms-swift" and not mask_failed_calls:
+        for message in messages:
+            if message["role"] == "tool_call":
+                message["loss"] = True
     record = {
         "id": question_dir.name,
         "messages": messages,
@@ -667,7 +752,35 @@ def build_trajectory_record(
         record["tools"] = dump_json(
             load_tools(question_dir, trace if isinstance(trace, dict) else None)
         )
+        if mask_failed_calls:
+            # Failure status was matched to call IDs above. Do not override a
+            # known success with a text heuristic here; just mask whole groups.
+            record, _ = mask_failed_tool_calls(record, inspect_responses=False)
     return record
+
+
+def collect_tool_statuses(
+    question_dir: Path, result: dict[str, Any], *, expected_call_ids: set[str] | None = None,
+) -> dict[str, bool]:
+    """Read structured call failures by ID, independent of tool-result order."""
+    statuses: dict[str, bool] = {}
+    for turn in result.get("turns", []) or []:
+        if not isinstance(turn, dict):
+            continue
+        for call in turn.get("tool_calls", []) or []:
+            if not isinstance(call, dict):
+                continue
+            call_id = clean_text(call.get("tool_call_id"))
+            if call_id and (isinstance(call.get("success"), bool) or call.get("error")):
+                statuses[call_id] = tool_result_failed(call)
+    if expected_call_ids is None or not expected_call_ids.issubset(statuses):
+        # Older run summaries lack per-call state; detailed turn records still
+        # provide success/error alongside the same call IDs.
+        for record in collect_tool_runtime_metadata(question_dir):
+            call_id = clean_text(record.get("tool_call_id"))
+            if call_id and (isinstance(record.get("success"), bool) or record.get("error")):
+                statuses.setdefault(call_id, tool_result_failed(record))
+    return statuses
 
 
 def collect_tool_runtime_metadata(question_dir: Path) -> list[dict[str, Any]]:
@@ -727,16 +840,21 @@ def convert_question_dir(question_dir: Path, args: argparse.Namespace) -> dict[s
 
     _, trace = load_trace(question_dir)
     if args.mode == "final":
-        return build_final_record(question_dir, trace, result)
-    return build_trajectory_record(
-        question_dir,
-        trace,
-        result,
-        include_reasoning=args.include_reasoning,
-        tool_role=args.tool_role,
-        output_schema=args.output_schema,
-        include_tool_metadata=args.include_tool_metadata,
-    )
+        record = build_final_record(question_dir, trace, result)
+    else:
+        record = build_trajectory_record(
+            question_dir,
+            trace,
+            result,
+            include_reasoning=args.include_reasoning,
+            tool_role=args.tool_role,
+            output_schema=args.output_schema,
+            include_tool_metadata=args.include_tool_metadata,
+            mask_failed_calls=getattr(args, "mask_failed_tool_calls", True),
+        )
+    if args.output_schema == "ms-swift":
+        return normalize_sample_loss(record)
+    return record
 
 
 def iter_records(input_path: Path, args: argparse.Namespace) -> Iterable[tuple[Path, dict[str, Any] | None, str | None]]:
@@ -777,6 +895,13 @@ def main() -> int:
         help="Store runtime tool metadata under sample metadata (never in model-visible messages)",
     )
     parser.add_argument("--success-only", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--mask-failed-tool-calls", action=argparse.BooleanOptionalAction, default=True,
+        help=(
+            "ms-swift trajectory only: mask a contiguous tool-call group if any call failed; "
+            "prefer source success/error flags, falling back to recognizable error returns"
+        ),
+    )
     parser.add_argument("--fail-fast", action="store_true")
     args = parser.parse_args()
 

@@ -9,6 +9,8 @@ from tqdm import tqdm
 
 from swift import get_processor, get_template
 
+from normalize_sft_loss import mask_failed_tool_calls as apply_failed_tool_masks, normalize_sample_loss
+
 
 CONTINUE_PATTERN = re.compile(
     r"^\s*(continue\.?|please continue\.?|go on\.?)\s*$",
@@ -121,6 +123,8 @@ def clean_messages(messages):
             and role == "assistant"
             and cleaned
             and cleaned[-1].get("role") == "assistant"
+            and cleaned[-1].get("loss") == new_msg.get("loss")
+            and cleaned[-1].get("loss_scale") == new_msg.get("loss_scale")
         ):
             prev = cleaned[-1]["content"].rstrip()
             curr = content.lstrip()
@@ -231,7 +235,7 @@ def get_assistant_stats(messages):
     }
 
 
-def clean_sample(sample):
+def clean_sample(sample, *, mask_failed_tool_calls=True):
     """
     对一条 trajectory 做 deterministic cleaning。
     """
@@ -270,6 +274,12 @@ def clean_sample(sample):
     )
 
     result["messages"] = messages
+    # A merged JSONL must have the same message fields in every Arrow chunk.
+    # Preserve explicit masks from other sources while filling missing ones.
+    result = normalize_sample_loss(result)
+    mask_stats = {"failed_tool_calls": 0, "masked_tool_groups": 0, "newly_masked_tool_calls": 0}
+    if mask_failed_tool_calls:
+        result, mask_stats = apply_failed_tool_masks(result)
 
     assistant_stats = get_assistant_stats(messages)
 
@@ -279,6 +289,7 @@ def clean_sample(sample):
         "tool_calls": num_tool_calls,
         "tool_responses": num_tool_responses,
         **assistant_stats,
+        **mask_stats,
     }
 
     return result, stats
@@ -337,6 +348,12 @@ def main():
             "0 disables."
         ),
     )
+    parser.add_argument(
+        "--mask-failed-tool-calls",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mask failed tool-call groups using explicit status or recognizable error returns",
+    )
 
     args = parser.parse_args()
 
@@ -374,6 +391,8 @@ def main():
     total_assistant_merged = 0
     total_tool_calls = 0
     total_tool_responses = 0
+    total_failed_tool_calls = 0
+    total_newly_masked_tool_calls = 0
 
     output_path.parent.mkdir(
         parents=True,
@@ -419,7 +438,9 @@ def main():
                     f"line_{line_no}",
                 )
 
-                cleaned, stats = clean_sample(sample)
+                cleaned, stats = clean_sample(
+                    sample, mask_failed_tool_calls=args.mask_failed_tool_calls,
+                )
 
                 # 用 SWIFT 真正的 training template encode
                 encoded = template.encode(cleaned)
@@ -476,6 +497,8 @@ def main():
                 total_tool_responses += stats[
                     "tool_responses"
                 ]
+                total_failed_tool_calls += stats["failed_tool_calls"]
+                total_newly_masked_tool_calls += stats["newly_masked_tool_calls"]
 
             except Exception as e:
                 rejected += 1
@@ -531,6 +554,8 @@ def main():
     print(f"Assistant merged:    {total_assistant_merged}")
     print(f"Tool calls:          {total_tool_calls}")
     print(f"Tool responses:      {total_tool_responses}")
+    print(f"Failed tool calls:   {total_failed_tool_calls}")
+    print(f"Newly masked calls:  {total_newly_masked_tool_calls}")
 
     if token_lengths:
         print("\nTOKEN LENGTH — ALL VALID ENCODED")

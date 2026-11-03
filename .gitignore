@@ -8,3 +8,5 @@ __pycache__/
 *fabv2*.txt
 data/
 .DS_STORE
+data/
+tests/

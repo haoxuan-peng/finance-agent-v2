@@ -16,9 +16,10 @@ dependencies = [
     "dotenv>=0.9.9",
     "requests>=2.32.5",
     "sec-api>=1.0.32",
-    "model-library==0.1.29",
+    "model-library==0.1.37",
     "tavily-python>=0.7.23",
     "simpleeval>=1.0.7",
+    "tqdm>=4.67.1",
 ]
 
 [build-system]
@@ -47,3 +48,7 @@ exclude = [
 ]
 typeCheckingMode = "basic"
 reportExplicitAny = false
+
+[tool.uv]
+exclude-newer = "7 days"
+exclude-newer-package = { certifi = false, model-library = false }

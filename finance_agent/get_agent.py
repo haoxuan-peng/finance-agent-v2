@@ -82,7 +82,13 @@ def get_agent(
             )
         tool_cls = available_tools[tool_name]
         if tool_name == "retrieve_information":
-            selected_tools.append(tool_cls(llm=llm))  # type: ignore[call-arg]
+            tool_config = parameters.llm_config.model_copy(
+                update={"prompt_caching": "off"}
+            )
+            tool_llm = create_llm(
+                parameters.model_copy(update={"llm_config": tool_config})
+            )
+            selected_tools.append(tool_cls(llm=tool_llm))  # type: ignore[call-arg]
         else:
             selected_tools.append(tool_cls())  # type: ignore[call-arg]
 

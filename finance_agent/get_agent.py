@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from model_library.agent import (
     Agent,
@@ -14,7 +15,7 @@ from model_library.agent import (
 from model_library.base import LLM, LLMConfig, RawResponse, TextInput
 from model_library.base.input import InputItem, SystemInput
 from model_library.exceptions import MaxContextWindowExceededError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .model_factory import get_model
 from .prompt import QUESTION_PROMPT, SYSTEM_PROMPT
@@ -38,6 +39,7 @@ class Parameters(BaseModel):
     max_time: float | None = None
     tools: list[str] = VALID_TOOLS
     llm_config: LLMConfig
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 def build_input(question: str) -> list[InputItem]:
@@ -48,11 +50,13 @@ def build_input(question: str) -> list[InputItem]:
 
 
 def create_llm(parameters: Parameters) -> LLM:
-    """Create an LLM using the same routing as the original finance agent.
-
-    Kept as a compatibility wrapper for callers of the v2 package; new code
-    should use :func:`model_factory.get_model` directly.
-    """
+    """Create a model with the routing and request options in Parameters."""
+    if parameters.extra_body:
+        return get_model(
+            parameters.model_name,
+            parameters.llm_config,
+            extra_body=parameters.extra_body,
+        )
     return get_model(parameters.model_name, parameters.llm_config)
 
 
@@ -62,8 +66,12 @@ def get_agent(
     log_dir: Path | None = None,
 ) -> Agent:
     """Helper method to instantiate an agent with the given parameters"""
+    if llm is not None and parameters.extra_body:
+        raise ValueError(
+            "extra_body cannot be applied to an injected llm; configure the supplied model directly"
+        )
     if llm is None:
-        llm = get_model(parameters.model_name, parameters.llm_config)
+        llm = create_llm(parameters)
 
     available_tools: dict[str, type[Tool]] = {
         "web_search": TavilyWebSearch,

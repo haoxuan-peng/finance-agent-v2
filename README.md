@@ -96,6 +96,51 @@ finance-agent --question-file data/public.txt
 
 The default configuration is the one we used to run the benchmark.
 
+### Reasoning and custom request options
+
+Use `--reasoning-effort` to select a value supported by your model endpoint:
+
+```bash
+finance-agent --model my-model --question-file data/public.txt --reasoning-effort high
+```
+
+The value is forwarded through model-library; supported values depend on the
+model and service. Omitting this option preserves the model/server defaults.
+`--reasoning-effort none` sends the literal string `none`, which is different
+from omitting the option. `--max-tokens` controls the generation limit and
+`--temperature` controls sampling; neither selects a reasoning effort.
+
+For bare-name custom Chat Completions models, use `--extra-body` to send a JSON
+object of backend-specific fields. For example, a vLLM Qwen deployment whose
+chat template supports `enable_thinking` can be called with:
+
+```bash
+finance-agent --model qwen3.5-9b --question-file data/public.txt \
+  --extra-body '{"chat_template_kwargs":{"enable_thinking":true}}'
+```
+
+Set `enable_thinking` to `false` to disable thinking on a template that supports
+that switch. On servers that support a separate reasoning token budget, include
+the server's documented field, for example:
+
+```bash
+finance-agent --model qwen3.5-9b --question-file data/public.txt \
+  --extra-body '{"chat_template_kwargs":{"enable_thinking":true},"thinking_token_budget":8192}'
+```
+
+These fields are passed through without translating effort levels into budgets;
+support depends on the server version and model template. Both the main agent
+and the `retrieve_information` helper receive the options; the helper continues
+to disable prompt caching. Nested objects are merged, with per-query overrides
+taking precedence over configured defaults.
+
+`--extra-body` requires a JSON object and is supported only on the bare-name
+custom proxy route. Provider-qualified registry names use their provider's
+model-library configuration instead. Setting `reasoning_effort` in both the
+flag and the JSON object is rejected. Python callers passing an existing
+`llm=` to `get_agent` must configure that model directly instead of using
+`Parameters.extra_body`.
+
 ### List of Models
 
 A list of available models can be found at our [model library](https://github.com/vals-ai/model-library/blob/main/model_library/config/all_models.json), and also by running `make browse-models` in the model library repository.

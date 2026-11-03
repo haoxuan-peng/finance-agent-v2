@@ -10,6 +10,7 @@ from model_library.base import LLMConfig
 from tqdm.asyncio import tqdm
 
 from .get_agent import Parameters, build_input, get_agent
+from .model_factory import validate_extra_body
 from .tools import VALID_TOOLS
 
 # A time or turn limit is reported through the stop reason, not by raising. Anything
@@ -19,6 +20,23 @@ _STOP_REASON_STATUS = {
     "max_time": "max_time",
     "max_turns": "max_turns",
 }
+
+
+def _parse_reasoning_effort(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("reasoning effort must be a nonempty string")
+    return value
+
+
+def _parse_extra_body(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("extra_body must be a JSON object")
+        return validate_extra_body(parsed)
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 async def run_single_task(
@@ -39,7 +57,9 @@ async def run_single_task(
         raise ValueError(f"task_id must be a single path segment, got {task_id!r}")
 
     agent = get_agent(parameters, log_dir=log_dir)
-    result = await agent.run(build_input(question), question_id=task_id, atif_export=True)
+    result = await agent.run(
+        build_input(question), question_id=task_id, atif_export=True
+    )
 
     generation = {
         "task_id": task_id,
@@ -81,11 +101,17 @@ async def run_tests_parallel(
     formatted_results = []
     for question, result in zip(questions, results):
         if isinstance(result, Exception):
-            formatted_results.append({"question": question, "success": False, "error": str(result)})
+            formatted_results.append(
+                {"question": question, "success": False, "error": str(result)}
+            )
             print(f"\nFAIL Question failed: {question}\n   Error: {result}\n")
         else:
             formatted_results.append(
-                {"question": question, "success": result.success, "result": result.model_dump(mode="json")}
+                {
+                    "question": question,
+                    "success": result.success,
+                    "result": result.model_dump(mode="json"),
+                }
             )
             if not result.success and result.final_error:
                 print(
@@ -109,7 +135,9 @@ async def run_tests_parallel(
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Run the harness for the finance agent benchmark")
+    parser = argparse.ArgumentParser(
+        description="Run the harness for the finance agent benchmark"
+    )
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -122,7 +150,26 @@ async def main():
         default=0.0,
         help="Temperature for model generation",
     )
-    parser.add_argument("--questions", type=str, nargs="+", help="List of questions to process")
+    parser.add_argument(
+        "--reasoning-effort",
+        type=_parse_reasoning_effort,
+        help=(
+            "Reasoning effort supported by the model endpoint (for example low, medium, high, "
+            "or the literal string none). Omit to preserve model/server defaults."
+        ),
+    )
+    parser.add_argument(
+        "--extra-body",
+        type=_parse_extra_body,
+        metavar="JSON",
+        help=(
+            "Extra request fields as a JSON object for bare-name custom Chat Completions "
+            'models, e.g. \'{"chat_template_kwargs":{"enable_thinking":true}}\''
+        ),
+    )
+    parser.add_argument(
+        "--questions", type=str, nargs="+", help="List of questions to process"
+    )
     parser.add_argument(
         "--model",
         type=str,
@@ -187,13 +234,23 @@ async def main():
         help="Run a single task and write <output-dir>/<task-id>/generation.json. "
         "Requires --task-id, and reads --question-file as one whole question.",
     )
-    parser.add_argument("--task-id", type=str, help="Task id naming the generation.json subdirectory")
+    parser.add_argument(
+        "--task-id", type=str, help="Task id naming the generation.json subdirectory"
+    )
     args = parser.parse_args()
 
     if args.no_max_turns and args.max_time is None:
         parser.error("--no-max-turns/--no_max_turns requires --max-time/--max_time")
     if args.max_time is not None and args.max_time <= 0:
         parser.error("--max-time/--max_time must be greater than 0")
+    try:
+        extra_body = validate_extra_body(
+            args.extra_body,
+            model_name=args.model,
+            reasoning_effort=args.reasoning_effort,
+        )
+    except (ValueError, TypeError) as error:
+        parser.error(str(error))
 
     env_file = Path(".env")
     load_dotenv(override=True, dotenv_path=env_file)
@@ -213,17 +270,23 @@ async def main():
     elif args.questions:
         questions = args.questions
     else:
-        raise Exception("No questions provided. One of --question-file or --questions must be used.")
+        raise Exception(
+            "No questions provided. One of --question-file or --questions must be used."
+        )
+
+    llm_config = LLMConfig(max_tokens=args.max_tokens, temperature=args.temperature)
+    if args.reasoning_effort is not None:
+        llm_config = llm_config.model_copy(
+            update={"reasoning_effort": args.reasoning_effort}
+        )
 
     parameters = Parameters(
         model_name=args.model,
         max_turns=None if args.no_max_turns else args.max_turns,
         max_time=args.max_time,
         tools=args.tools,
-        llm_config=LLMConfig(
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-        ),
+        llm_config=llm_config,
+        extra_body=extra_body,
     )
 
     if single_task:

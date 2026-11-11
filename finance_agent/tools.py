@@ -24,6 +24,7 @@ from .exceptions import (
 from .key_rotator import KeyRotator, NoAvailableAPIKeysError, get_rotator
 
 
+MAX_END_DATE = "2025-05-31"
 VALID_TOOLS = [
     "web_search",
     "retrieve_information",
@@ -138,11 +139,12 @@ class TavilyWebSearch(Tool):
         },
         "start_date": {
             "type": "string",
-            "description": "(optional) The start date for the search range for in the format YYYY-MM-DD",
+            "description": f"(optional) The start date for the search range in the format YYYY-MM-DD. If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
         },
         "end_date": {
             "type": "string",
-            "description": "(optional) The end date for the search range in the format YYYY-MM-DD.",
+            "description": f"(optional) The end date for the search range in the format YYYY-MM-DD. If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
+            "default": MAX_END_DATE,
         },
         "number_of_results": {
             "type": "integer",
@@ -200,25 +202,26 @@ class TavilyWebSearch(Tool):
         self,
         search_query: str,
         start_date: str | None = None,
-        end_date: str | None = None,
+        end_date: str | None = MAX_END_DATE,
         number_of_results: int = 10,
     ) -> list[dict[str, Any]]:
         kwargs = {}
 
-        if end_date:
-            _validate_date_format("end_date", end_date)
+        end_date = end_date or MAX_END_DATE
+        _validate_date_format("end_date", end_date)
+        end_date = min(end_date, MAX_END_DATE)
 
         if start_date:
             _validate_date_format("start_date", start_date)
-            if end_date and start_date > end_date:
+            start_date = min(start_date, MAX_END_DATE)
+            if start_date > end_date:
                 raise ValueError(
                     f"Parameter start_date '{start_date}' was set to a date that is later than end_date '{end_date}'"
                 )
 
             kwargs["start_date"] = start_date
 
-        if end_date:
-            kwargs["end_date"] = end_date
+        kwargs["end_date"] = end_date
 
         last_key_error: Exception | None = None
         while self._key_rotator.active_key_count:
@@ -286,12 +289,13 @@ class EDGARSearch(Tool):
         },
         "start_date": {
             "type": "string",
-            "description": "(optional) Start date for the search range in yyyy-mm-dd format.",
+            "description": f"(optional) Start date for the search range in yyyy-mm-dd format. If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
             "default": "1900-01-01",
         },
         "end_date": {
             "type": "string",
-            "description": "(optional) End date for the search range in yyyy-mm-dd format.",
+            "description": f"(optional) End date for the search range in yyyy-mm-dd format. If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
+            "default": MAX_END_DATE,
         },
         "page": {
             "type": "integer",
@@ -327,7 +331,7 @@ class EDGARSearch(Tool):
         self,
         search_query: str,
         start_date: str = "1900-01-01",
-        end_date: str | None = None,
+        end_date: str | None = MAX_END_DATE,
         top_n_results: int = 100,
         page: int = 1,
         form_types: list[str] | str | None = None,
@@ -344,10 +348,13 @@ class EDGARSearch(Tool):
             )
 
         _validate_date_format("start_date", start_date)
-        if end_date is not None:
-            _validate_date_format("end_date", end_date)
+        end_date = end_date or MAX_END_DATE
+        _validate_date_format("end_date", end_date)
 
-        if end_date is not None and start_date > end_date:
+        start_date = min(start_date, MAX_END_DATE)
+        end_date = min(end_date, MAX_END_DATE)
+
+        if start_date > end_date:
             raise ValueError(
                 f"Parameter start_date '{start_date}' was set to a date that is later than end_date '{end_date}'"
             )
@@ -355,10 +362,8 @@ class EDGARSearch(Tool):
         payload: dict[str, str | int | list[str]] = {
             "query": search_query,
             "startDate": start_date,
+            "endDate": end_date,
         }
-
-        if end_date:
-            payload["endDate"] = end_date
 
         if page:
             payload["page"] = page
@@ -536,11 +541,11 @@ class PriceHistory(Tool):
         },
         "start_date": {
             "type": "string",
-            "description": "Start date YYYY-MM-DD (inclusive).",
+            "description": f"Start date YYYY-MM-DD (inclusive). If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
         },
         "end_date": {
             "type": "string",
-            "description": "End date YYYY-MM-DD (inclusive).",
+            "description": f"End date YYYY-MM-DD (inclusive). If the value is later than {MAX_END_DATE}, it will be set to {MAX_END_DATE}.",
         },
         "asset_class": {
             "type": "string",
@@ -659,6 +664,8 @@ class PriceHistory(Tool):
 
             _validate_date_format("start_date", start_date)
             _validate_date_format("end_date", end_date)
+            start_date = min(start_date, MAX_END_DATE)
+            end_date = min(end_date, MAX_END_DATE)
             if start_date > end_date:
                 raise ValueError(
                     f"start_date '{start_date}' is later than end_date '{end_date}'."

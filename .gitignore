@@ -9,4 +9,5 @@ __pycache__/
 data/
 .DS_STORE
 data/
-tests/
+tests/*
+!tests/test_date_cutoff.py

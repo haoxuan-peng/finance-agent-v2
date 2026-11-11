@@ -96,6 +96,10 @@ finance-agent --question-file data/public.txt
 
 The default configuration is the one we used to run the benchmark.
 
+The harness uses May 31, 2025 as its fixed reference date. The `web_search`,
+`edgar_search`, and `price_history` tools cap query dates at `2025-05-31`;
+web and EDGAR searches also use that date when no end date is provided.
+
 ### Reasoning and custom request options
 
 Use `--reasoning-effort` to select a value supported by your model endpoint:
